@@ -1,0 +1,35 @@
+{
+  "name": "pi-discord-comms",
+  "version": "0.2.0",
+  "description": "Discord as a second channel for a running Pi session: pings, button approvals, and remote replies",
+  "keywords": ["pi-package", "pi", "pi-coding-agent", "discord"],
+  "license": "MIT",
+  "author": "jaaamesk",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jaaamesk/pi-discord-comms"
+  },
+  "bugs": "https://github.com/jaaamesk/pi-discord-comms/issues",
+  "homepage": "https://github.com/jaaamesk/pi-discord-comms#readme",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "tsc -p .",
+    "test": "node --experimental-strip-types test/approvals.ts && node --experimental-strip-types test/extension-load.ts",
+    "test:gateway": "node --experimental-strip-types test/gateway.ts",
+    "doctor": "node --experimental-strip-types test/doctor.ts"
+  },
+  "pi": {
+    "extensions": ["./extensions"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^1.3.0",
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2"
+  }
+}

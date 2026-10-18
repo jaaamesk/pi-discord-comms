@@ -1,0 +1,22 @@
+# dependencies
+node_modules/
+
+# never commit credentials: the real config lives at ~/.pi/agent/discord-comms.json,
+# these patterns catch an accident if someone drops a copy in the repo
+.env
+.env.*
+!.env.example
+*.token
+discord-comms.local.json
+discord-comms.json
+
+# runtime state
+discord-comms.lock
+*.log
+*.tsbuildinfo
+coverage/
+
+# editors / os
+.DS_Store
+.idea/
+.vscode/
