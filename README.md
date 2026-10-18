@@ -115,7 +115,7 @@ npm run doctor         # pre-flight against your own channel (hits Discord)
 
 ## Known limits
 
-- One gateway owner per token. A hub daemon that fans out to several Pi sessions over a Unix socket is the natural next step; the extension boundary is thin enough that it is additive, not a rewrite. See [PLAN.md](PLAN.md).
+- One gateway owner per token. Only the window holding it gets notifications; move it with `/discord disconnect` in the old window then `/discord connect` in the new one, and see who holds it with `/discord status`. A lock orphaned by a killed process is reclaimed automatically. A hub daemon that fans out to several Pi sessions over a Unix socket — one bot, one channel per project — is the planned fix; see [PLAN.md](PLAN.md) §9.
 - Prompts owned by **other** extensions get a mirrored copy, not remote buttons. `ui_prompt_start` reports only the prompt kind, and Pi passes no title at all for `custom` prompts, so this extension re-reads the pending tool call to recover the question, its context, and its numbered options. You still answer at the keyboard: nothing in Pi lets another extension inject an answer into a prompt it does not own. Answerable questions would mean this extension owning the tool, which replaces the other extension's terminal UI.
 - No live progress line yet, so a long run is silent until it settles; a `Detail` follow-up message is the current way to see full tool input.
 - `channelId: "dm"` works, but bots may only open a DM with a user who shares a guild with them, so the invite step is still required.
