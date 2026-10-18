@@ -16,6 +16,10 @@ discord-comms.lock
 *.tsbuildinfo
 coverage/
 
+# design notes / private planning: kept on disk, never published
+PLAN.md
+notes/
+
 # editors / os
 .DS_Store
 .idea/
