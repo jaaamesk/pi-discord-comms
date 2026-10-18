@@ -106,7 +106,7 @@ Read this before pointing it at a shared server.
 
 ```bash
 npm run check          # typecheck
-npm run test           # approval policy + race semantics + dormancy rules (no network)
+npm run test           # approval policy + race semantics + question mirror + dormancy rules (no network)
 npm run test:gateway   # real gateway handshake, proves 4004 is treated as fatal (hits Discord)
 npm run doctor         # pre-flight against your own channel (hits Discord)
 ```
@@ -116,7 +116,7 @@ npm run doctor         # pre-flight against your own channel (hits Discord)
 ## Known limits
 
 - One gateway owner per token. A hub daemon that fans out to several Pi sessions over a Unix socket is the natural next step; the extension boundary is thin enough that it is additive, not a rewrite. See [PLAN.md](PLAN.md).
-- Arbitrary terminal prompts get a heads-up ping, not a remote answer: `ui_prompt_start` exposes the prompt kind and title but not its options. Approvals that this extension owns get real buttons.
+- Prompts owned by **other** extensions get a mirrored copy, not remote buttons. `ui_prompt_start` reports only the prompt kind, and Pi passes no title at all for `custom` prompts, so this extension re-reads the pending tool call to recover the question, its context, and its numbered options. You still answer at the keyboard: nothing in Pi lets another extension inject an answer into a prompt it does not own. Answerable questions would mean this extension owning the tool, which replaces the other extension's terminal UI.
 - No live progress line yet, so a long run is silent until it settles; a `Detail` follow-up message is the current way to see full tool input.
 - `channelId: "dm"` works, but bots may only open a DM with a user who shares a guild with them, so the invite step is still required.
 

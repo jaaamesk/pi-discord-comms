@@ -4,6 +4,7 @@ import { connectGateway, Intents, type Gateway, type GatewayState } from "./gate
 import { DiscordRest } from "./rest.ts";
 import { CONFIG_PATH, loadConfig, missingConfig } from "./config.ts";
 import { ApprovalBroker, riskReason } from "./approvals.ts";
+import { questionMirror } from "./ask-mirror.ts";
 import { COLORS, clip, fence, type DiscordMessage, type Embed, type Interaction, type MessagePayload } from "./types.ts";
 
 // Pi session -> Discord channel, two ways round:
@@ -26,6 +27,9 @@ export default function discordComms(pi: ExtensionAPI) {
   let dormant: string | undefined;
   let lastState: GatewayState = "idle";
   let lastDetail = "";
+  // Set while an ask-style prompt owned by another extension is mirrored here, so the
+  // generic (and contentless) "waiting at a custom" ping does not arrive as well.
+  let mirroredCallId: string | undefined;
 
   const renderStatus = () => {
     if (!ctx0?.hasUI) return;
@@ -262,18 +266,46 @@ export default function discordComms(pi: ExtensionAPI) {
     ping(`${icon} ${event.aborted ? "Run stopped" : "Done — waiting for input"}`, lastAssistantText());
   });
 
-  // Options are not exposed here, so a remote user gets the heads-up rather than a
-  // button they cannot act on; approval prompts that we own get real buttons.
   pi.on("ui_prompt_start", (event, ctx) => {
     ctx0 = ctx;
-    if (cfg.level === "quiet" || !channelId) return;
+    if (cfg.level === "quiet" || !channelId || mirroredCallId) return;
     ping(`${ICON.waiting} Pi is waiting at a ${event.kind}`, event.title ?? "(no title)", COLORS.warning);
+  });
+
+  pi.on("ui_prompt_end", (_event, ctx) => {
+    ctx0 = ctx;
+    mirroredCallId = undefined;
+  });
+
+  // Safety net: if the ask-style call returns without ever opening a prompt (RPC mode,
+  // or a tool that answers itself), do not leave the next prompt suppressed.
+  pi.on("tool_execution_end", (event, ctx) => {
+    ctx0 = ctx;
+    if (mirroredCallId && event.toolCallId === mirroredCallId) mirroredCallId = undefined;
   });
 
   pi.on("tool_call", async (event, ctx) => {
     ctx0 = ctx;
-    if (cfg.approvals === "off" || !broker || broker.allowingEverything) return undefined;
+
     const input = event.input as Record<string, unknown>;
+
+    // pi-ask-user draws its own prompt, so Pi reports no title and no options for it.
+    // Mirror the real question instead of alerting that something is pending.
+    const mirror = questionMirror(event.toolName, input);
+    if (mirror) {
+      mirroredCallId = event.toolCallId;
+      void send({
+        embeds: [
+          embedFor(
+            `🗣 Waiting on your answer · ${event.toolName}`,
+            [mirror.description, "Answer in the terminal — prompts owned by other extensions cannot be answered from Discord yet."].filter(Boolean).join("\n\n"),
+            COLORS.warning,
+            mirror.fields,
+          ),
+        ],
+      });
+    }
+    if (cfg.approvals === "off" || !broker || broker.allowingEverything) return undefined;
     const annotations = pi.getAllTools().find((tool) => tool.name === event.toolName)?.annotations;
     const reason = riskReason(cfg.approvals, { toolName: event.toolName, input, cwd: ctx.cwd, annotations });
     if (!reason) return undefined;
