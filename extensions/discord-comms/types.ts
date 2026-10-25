@@ -50,6 +50,13 @@ export type Button = {
 
 export type ActionRow = { type: 1; components: Button[] };
 
+/**
+ * The same rows with every button greyed out, for an embed rewritten after its answer
+ * landed: an embed that still looks clickable is read as still answering.
+ */
+export const disabledRows = (rows: ActionRow[]): ActionRow[] =>
+  rows.map((row) => ({ ...row, components: row.components.map((b) => ({ ...b, disabled: true })) }));
+
 export type MessagePayload = {
   content?: string;
   embeds?: Embed[];
@@ -82,8 +89,30 @@ export type Interaction = {
 };
 
 /** Discord limits: 2000 chars of content, 4096 per embed description, 1024 per field value. */
+export const EMBED_DESCRIPTION_LIMIT = 4096;
+
 export const clip = (s: string, max: number): string =>
   s.length <= max ? s : `${s.slice(0, Math.max(0, max - 1))}…`;
+
+/**
+ * The embed shape every ping from this extension uses, so each one carries the same footer
+ * and a clipped body. `footer` names the session that sent it: two Pi windows can post into
+ * the same channel days apart, and an old embed is otherwise untraceable.
+ */
+export const buildEmbed = (
+  footer: string,
+  title: string,
+  description: string,
+  color: number,
+  fields?: EmbedField[],
+): Embed => ({
+  title,
+  description: clip(description || "—", EMBED_DESCRIPTION_LIMIT),
+  color,
+  fields,
+  footer: { text: footer },
+  timestamp: new Date().toISOString(),
+});
 
 export const fence = (s: string, max = 1024): string => clip(`\`\`\`text\n${s}\n\`\`\``, max);
 

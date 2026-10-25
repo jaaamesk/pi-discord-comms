@@ -1,4 +1,5 @@
 import type { ApprovalBroker, Decision } from "./approvals.ts";
+import type { AskBridge } from "./ask-bridge.ts";
 import type { DiscordRest } from "./rest.ts";
 import { CallbackType, EPHEMERAL, InteractionType, clip, type Interaction } from "./types.ts";
 
@@ -7,7 +8,7 @@ import { CallbackType, EPHEMERAL, InteractionType, clip, type Interaction } from
 // answered at the keyboard a second ago. Every branch answers the clicker in visible text,
 // because a silent return is indistinguishable from a dead bridge.
 
-export type RouteCode = "decision" | "detail" | "stale" | "wrong-user" | "not-a-click";
+export type RouteCode = "decision" | "detail" | "answered" | "toggled" | "refused" | "stale" | "wrong-user" | "not-a-click";
 
 export type RouteResult = { code: RouteCode; decision?: Decision; note?: string };
 
@@ -20,6 +21,8 @@ const NOT_YOURS = "pi-discord-comms only listens to its configured user.";
 export function createInteractionRouter(deps: {
   rest: DiscordRest;
   broker: ApprovalBroker;
+  /** Absent when nothing can answer prompts, which is the usual case with the published pi-ask-user. */
+  prompts?: AskBridge;
   userId: string;
   log: (message: string, warning?: boolean) => void;
 }): Router {
@@ -62,10 +65,17 @@ export function createInteractionRouter(deps: {
       await say(deps.broker.detailFor(interaction) ?? STALE);
       return { code: "detail" };
     }
-    if (outcome.kind === "unknown") {
-      await say(STALE);
-      return { code: "stale", note: `custom_id ${interaction.data?.custom_id ?? "(none)"}` };
+    if (outcome.kind === "decision") return { code: "decision", decision: outcome.decision };
+
+    // Two brokers share the channel: approvals carry `pi:` buttons, prompt answers carry `ask:`.
+    const ask = await deps.prompts?.handle(interaction);
+    if (ask && ask.kind !== "unknown") {
+      // A refused answer is told to the clicker: "nothing was answered" has to be visible, or a
+      // lost answer looks like a delivered one.
+      if (ask.kind === "refused") await say(ask.note);
+      return { code: ask.kind, note: ask.kind === "toggled" || ask.kind === "answered" ? ask.note : undefined };
     }
-    return { code: "decision", decision: outcome.decision };
+    await say(STALE);
+    return { code: "stale", note: `custom_id ${interaction.data?.custom_id ?? "(none)"}` };
   };
 }

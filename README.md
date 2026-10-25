@@ -71,9 +71,28 @@ Environment overrides: `PI_DISCORD_TOKEN`, `PI_DISCORD_USER_ID`, `PI_DISCORD_CHA
 
 The footer shows `● discord · #<channel> · <4-char session tag> · connected`, or `○ discord · <why it is dormant>`.
 
-`/discord status` also prints what a diagnosis needs: how many button clicks arrived, how many resolved a blocked call, how many were stale or refused, and the last problem it hit. Anything Discord refuses (a rejected ack, a failed embed, a reply it could not send) is reported in the terminal the moment it happens instead of being swallowed.
+`/discord status` also prints what a diagnosis needs: how many button clicks arrived, how many resolved a blocked call, how many answered a question, how many were stale or refused, whether the prompt bridge is live or the mirror is all there is, and the last problem it hit. Anything Discord refuses (a rejected ack, a failed embed, a reply it could not send) is reported in the terminal the moment it happens instead of being swallowed.
 
-**In Discord:** type anything to talk to the agent, `!stop` to abort the current run, `!status` for a state dump. Buttons carry a `pi:<action>:<tag>:<id>` id, so a click resolves exactly the blocked call it came from and can never answer another Pi session's request.
+**In Discord:** type anything to talk to the agent, `!stop` to abort the current run, `!status` for a state dump. Buttons carry a `pi:<action>:<tag>:<id>` id for approvals and an `ask:<tag>:<id>:<choice>` id for questions, so a click resolves exactly the thing it came from and can never answer another Pi session's request.
+
+## Answering a question from Discord
+
+When the agent asks you something with `ask_user`, the question arrives as an embed with a button per option and the way to answer printed underneath. This needs the forked `pi-ask-user` (upstream publishes the question but nothing that would answer it); with the published package you still get the question, mirrored read-only, and the embed says so.
+
+| You type | It means |
+|---|---|
+| `2` | option 2 of the question being asked |
+| `2 Ship it` | option 2 of question 2, when more than one question is waiting |
+| `Ship it` | the option whose title matches exactly, case-insensitively |
+| any other text | a freeform answer, for a question that takes one |
+| `1,3` then `Send` | a multi-select answer: tap the options, or name the numbers |
+| `Send` | submit the review step at the end of a multi-question call |
+| `!back 2` | go back and re-answer question 2 before sending |
+| `!cancel` | cancel, exactly as Escape does in the terminal |
+| `!skip` | no answer, where the question can be skipped |
+| `!chat <text>` | talk to the agent instead of answering — this is the way out |
+
+First answer wins, as with approvals: answer at the desk and the embed rewrites itself to say so, and an embed whose question was answered, cancelled or timed out elsewhere is greyed out rather than left looking clickable.
 
 ## Approval policy
 
@@ -128,6 +147,8 @@ npm run probe          # posts real buttons, then a real click must resolve them
 | Embeds arrive but nothing you type in the channel ever reaches the agent | The gateway is not `ready` (inbound messages and clicks both arrive over it). Footer and `/discord status` name the state and the reason. |
 | `/discord status` says `dormant` | Another live Pi process holds the single gateway connection. `/discord disconnect` there, `/discord connect` here. |
 | Approvals never appear | `/discord risk <command>` shows whether the policy gates that call at all, and `!status` in the channel shows the live `approvals` mode. |
+| A question appears with no buttons and says to answer in the terminal | No bridge: the published `pi-ask-user` is loaded, which can show a question but not accept one from outside. `/discord status` says `no bridge: read-only mirror`. |
+| You answered a question and it says nothing was answered | Either surface can win, and the loser is told rather than ignored. Check the terminal: the question is closed if the keyboard got there first, and if it is still open the answer named an option that question does not offer. |
 
 `npm run probe` is the way to settle a click question for certain: it connects to the gateway on its own, posts a real approval embed with real buttons, prints the `INTERACTION_CREATE` frame it receives (type, `custom_id`, clicker, channel — never the continuation token), and exits 0 only when a click actually resolves the blocked call. It refuses to run while a live Pi session holds the lock, because a second gateway connection evicts that one; stop it first or pass `--force`.
 

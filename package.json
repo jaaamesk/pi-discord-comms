@@ -17,7 +17,7 @@
   },
   "scripts": {
     "check": "tsc -p .",
-    "test": "node --experimental-strip-types test/approvals.ts && node --experimental-strip-types test/interactions.ts && node --experimental-strip-types test/ask-mirror.ts && node --experimental-strip-types test/extension-load.ts",
+    "test": "node --experimental-strip-types test/approvals.ts && node --experimental-strip-types test/interactions.ts && node --experimental-strip-types test/ask-mirror.ts && node --experimental-strip-types test/ask-bridge.ts && node --experimental-strip-types test/extension-load.ts",
     "test:gateway": "node --experimental-strip-types test/gateway.ts",
     "probe": "node --experimental-strip-types test/interaction-probe.ts",
     "doctor": "node --experimental-strip-types test/doctor.ts"

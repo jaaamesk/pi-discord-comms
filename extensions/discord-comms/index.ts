@@ -5,8 +5,9 @@ import { DiscordRest } from "./rest.ts";
 import { loadConfig, missingConfig } from "./config.ts";
 import { ApprovalBroker, riskReason } from "./approvals.ts";
 import { createInteractionRouter, type RouteCode, type Router } from "./interactions.ts";
-import { questionMirror } from "./ask-mirror.ts";
-import { COLORS, clip, type DiscordMessage, type Embed, type Interaction, type MessagePayload } from "./types.ts";
+import { AskBridge } from "./ask-bridge.ts";
+import { mirrorMessage, questionMirror } from "./ask-mirror.ts";
+import { COLORS, buildEmbed, clip, type DiscordMessage, type Embed, type Interaction, type MessagePayload } from "./types.ts";
 
 // Pi session -> Discord channel, two ways round:
 //   outbound  run settled / blocked prompt / approval request
@@ -24,19 +25,21 @@ export default function discordComms(pi: ExtensionAPI) {
   let gw: Gateway | undefined;
   let rest: DiscordRest | undefined;
   let broker: ApprovalBroker | undefined;
+  let asks: AskBridge | undefined;
   let route: Router | undefined;
   let channelId: string | undefined;
   let dormant: string | undefined;
   let lastState: GatewayState = "idle";
   let lastDetail = "";
-  // Set while an ask-style prompt owned by another extension is mirrored here, so the
-  // generic (and contentless) "waiting at a custom" ping does not arrive as well.
+  // Set while an ask-style prompt owned by another extension is on Discord, whether as the
+  // read-only mirror or as a live prompt from the bridge, so the generic (and contentless)
+  // "waiting at a custom" ping does not arrive as well.
   let mirroredCallId: string | undefined;
 
   // Everything below is diagnostics. A bridge that fails silently is worse than one that
   // complains, and both of the ways this extension can be dead (socket down, clicks refused)
   // are otherwise invisible from the terminal.
-  const stats: Record<RouteCode, number> = { decision: 0, detail: 0, stale: 0, "wrong-user": 0, "not-a-click": 0 };
+  const stats: Record<RouteCode, number> = { decision: 0, detail: 0, answered: 0, toggled: 0, refused: 0, stale: 0, "wrong-user": 0, "not-a-click": 0 };
   let seenInteractions = 0;
   let lastEvent = "nothing yet";
   let lastProblem = "";
@@ -73,14 +76,10 @@ export default function discordComms(pi: ExtensionAPI) {
     }
   };
 
-  const embedFor = (title: string, description: string, color: number, fields?: Embed["fields"]): Embed => ({
-    title,
-    description: clip(description || "—", 4096),
-    color,
-    fields,
-    footer: { text: `${tag} · ${project()} · ${ctx0?.model?.id ?? "model"}` },
-    timestamp: new Date().toISOString(),
-  });
+  const footerText = () => `${tag} · ${project()} · ${ctx0?.model?.id ?? "model"}`;
+
+  const embedFor = (title: string, description: string, color: number, fields?: Embed["fields"]): Embed =>
+    buildEmbed(footerText(), title, description, color, fields);
 
   const ping = (title: string, description: string, color: number = COLORS.info) =>
     send({ embeds: [embedFor(title, description, color)] });
@@ -122,7 +121,8 @@ export default function discordComms(pi: ExtensionAPI) {
           `channel: ${channelId ?? "unresolved"} · tag ${tag}`,
           `level: ${cfg.level} · approvals: ${cfg.approvals}${broker?.allowingEverything ? " (allowed everything this session)" : ""}`,
           `approvals pending: ${broker?.pendingCount ?? 0} · raceTerminal: ${cfg.raceTerminal}`,
-          `clicks: ${seenInteractions} seen · ${stats.decision} decisions · ${stats.detail} detail · ${stats.stale} stale · ${stats["wrong-user"]} refused`,
+          `ask prompts: ${asks?.openCount ?? 0} open · ${asks?.answerableCount ?? 0} answerable · ${asks?.bridged ? "bridge live" : "no bridge: read-only mirror"}`,
+          `clicks: ${seenInteractions} seen · ${stats.decision} decisions · ${stats.answered} answers · ${stats.toggled} picks · ${stats.detail} detail · ${stats.stale} stale · ${stats.refused} refused · ${stats["wrong-user"]} not you`,
           `last event: ${lastEvent}`,
           `last problem: ${lastProblem || "none"}`,
           `agent busy: ${ctx0 ? !ctx0.isIdle() : "unknown"}`,
@@ -155,10 +155,36 @@ export default function discordComms(pi: ExtensionAPI) {
       await rest?.react(channel, message.id, "👀").catch(() => {});
       return;
     }
+
+    // An open ask_user question owns the next reply. On a phone there is nothing to tell an
+    // answer from a new instruction, and guessing wrong loses the answer silently.
+    const verdict = await asks?.inbound(text);
+    if (verdict) {
+      if (verdict.kind === "chat") {
+        await deliver(ctx, channel, message.id, verdict.text);
+        return;
+      }
+      if (verdict.kind === "refused") {
+        // A refusal has to be visible: "nothing was answered" is the difference between a lost
+        // answer and a delivered one.
+        await send({ content: clip(verdict.note, 2000) });
+        await rest?.react(channel, message.id, "❓").catch(() => {});
+        log(`a prompt answer was refused: ${verdict.note}`, true);
+        return;
+      }
+      await rest?.react(channel, message.id, "👀").catch(() => {});
+      if (verdict.kind !== "answered") log(`a prompt click came back as ${verdict.kind}`, true);
+      return;
+    }
+
     if (verb.startsWith("!")) {
       await rest?.react(channel, message.id, "❓").catch(() => {});
       return;
     }
+    await deliver(ctx, channel, message.id, text);
+  };
+
+  const deliver = async (ctx: ExtensionContext | undefined, channel: string, messageId: string, text: string) => {
     if (!ctx) return;
     try {
       // Idle: a normal turn. Streaming: queued so the run is not torn up mid-flight.
@@ -168,7 +194,7 @@ export default function discordComms(pi: ExtensionAPI) {
       ctx.ui.notify(`discord: could not deliver inbound message — ${(err as Error).message}`, "warning");
       return;
     }
-    await rest?.react(channel, message.id, "👀").catch(() => {});
+    await rest?.react(channel, messageId, "👀").catch(() => {});
     ctx.ui.notify(`discord: inbound message delivered to the agent`, "info");
   };
 
@@ -182,7 +208,11 @@ export default function discordComms(pi: ExtensionAPI) {
         ? `click answered a ${result.decision} for a blocked tool call`
         : result.code === "detail"
           ? "clicked for full tool input"
-          : `${result.code}${result.note ? `: ${result.note}` : ""}`;
+          : result.code === "answered"
+            ? `a prompt was answered from Discord: ${result.note ?? ""}`
+            : result.code === "toggled"
+              ? `a prompt selection changed: ${result.note ?? ""}`
+              : `${result.code}${result.note ? `: ${result.note}` : ""}`;
     renderStatus();
   };
 
@@ -200,7 +230,8 @@ export default function discordComms(pi: ExtensionAPI) {
     dormant = undefined;
     rest = new DiscordRest(cfg.token!);
     broker = new ApprovalBroker(rest, cfg, tag, () => channelId, log);
-    route = createInteractionRouter({ rest, broker, userId: cfg.userId!, log });
+    asks = new AskBridge({ rest, tag, channel: () => channelId, log, footer: footerText });
+    route = createInteractionRouter({ rest, broker, prompts: asks, userId: cfg.userId!, log });
     gw = connectGateway({
       token: cfg.token!,
       intents: Intents.Guilds | Intents.GuildMessages | Intents.MessageContent,
@@ -226,8 +257,13 @@ export default function discordComms(pi: ExtensionAPI) {
     gw = undefined;
     rest = undefined;
     broker = undefined;
+    // Stop listening: with the channel gone there is nothing to render to, and a later
+    // /discord connect re-adopts whatever is open from scratch.
+    asks?.close();
+    asks = undefined;
     route = undefined;
     channelId = undefined;
+    mirroredCallId = undefined;
     releaseLock();
   };
 
@@ -258,8 +294,12 @@ export default function discordComms(pi: ExtensionAPI) {
           "info",
         );
         ctx.ui.notify(
-          `discord: ${seenInteractions} clicks · ${stats.decision} answered · ${stats.stale} stale · ${stats["wrong-user"]} refused · last problem: ${lastProblem || "none"}`,
+          `discord: ${seenInteractions} clicks · ${stats.decision} decisions · ${stats.answered} answers · ${stats.stale} stale · ${stats.refused} refused · ${stats["wrong-user"]} not you`,
           lastProblem ? "warning" : "info",
+        );
+        ctx.ui.notify(
+          `discord: ask prompts ${asks?.openCount ?? 0} open · ${asks?.answerableCount ?? 0} answerable · ${asks?.bridged ? "bridge live" : "no bridge: questions are a read-only mirror"} · last problem: ${lastProblem || "none"}`,
+          "info",
         );
       }
       renderStatus();
@@ -293,7 +333,8 @@ export default function discordComms(pi: ExtensionAPI) {
   pi.on("ui_prompt_start", (event, ctx) => {
     ctx0 = ctx;
     // A pending approval owns the prompt this fires for; it is already on Discord as a decision.
-    if (cfg.level === "quiet" || !channelId || mirroredCallId || (broker?.pendingCount ?? 0) > 0) return;
+    // So does a mirrored ask-style question, which is on Discord as a question instead.
+    if (cfg.level === "quiet" || !channelId || mirroredCallId || (broker?.pendingCount ?? 0) > 0 || (asks?.openCount ?? 0) > 0) return;
     ping(`${ICON.waiting} Pi is waiting at a ${event.kind}`, event.title ?? "(no title)", COLORS.warning);
   });
 
@@ -314,21 +355,14 @@ export default function discordComms(pi: ExtensionAPI) {
 
     const input = event.input as Record<string, unknown>;
 
-    // pi-ask-user draws its own prompt, so Pi reports no title and no options for it.
-    // Mirror the real question instead of alerting that something is pending.
-    const mirror = questionMirror(event.toolName, input);
-    if (mirror) {
+    // pi-ask-user draws its own prompt, so Pi reports no title and no options for it, and the
+    // generic ping would say nothing useful. When the asking side publishes the prompt, the live
+    // embed arrives from the prompt itself, buttons and all; the read-only mirror is what is left
+    // when it does not, which is why the bridge is asked here rather than once at startup.
+    if (questionMirror(event.toolName, input)) {
       mirroredCallId = event.toolCallId;
-      void send({
-        embeds: [
-          embedFor(
-            `🗣 Waiting on your answer · ${event.toolName}`,
-            [mirror.description, "Answer in the terminal — prompts owned by other extensions cannot be answered from Discord yet."].filter(Boolean).join("\n\n"),
-            COLORS.warning,
-            mirror.fields,
-          ),
-        ],
-      });
+      const mirror = asks?.attach() ? undefined : mirrorMessage(event.toolName, input, footerText());
+      if (mirror) void send(mirror);
     }
     if (cfg.approvals === "off" || !broker || broker.allowingEverything) return undefined;
     const annotations = pi.getAllTools().find((tool) => tool.name === event.toolName)?.annotations;

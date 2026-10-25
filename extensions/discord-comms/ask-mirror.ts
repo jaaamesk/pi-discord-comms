@@ -1,7 +1,9 @@
-import { clip } from "./types.ts";
+import { COLORS, buildEmbed, clip, type MessagePayload } from "./types.ts";
 
 // Another extension owns the ask_user prompt, so we can read the question it is about to
-// ask but cannot answer it. This renders that question faithfully for Discord.
+// ask but cannot answer it. This renders that question faithfully for Discord: no buttons,
+// because nothing outside the asking extension can settle its promise. When pi-ask-user
+// publishes the prompt instead (see ask-bridge.ts), the live embed replaces this copy.
 
 export type QuestionMirror = {
   description: string;
@@ -58,4 +60,19 @@ export function questionMirror(toolName: string, input: Record<string, unknown>)
 
   const context = typeof input.context === "string" ? input.context.trim() : "";
   return { description: context, fields };
+}
+
+/**
+ * The read-only copy of an ask call, ready to send. This is what remains when nothing can
+ * answer the question remotely, which is why it offers no components: a button that cannot
+ * be settled is worse than a button never offered.
+ */
+export function mirrorMessage(toolName: string, input: Record<string, unknown>, footer: string): MessagePayload | undefined {
+  const mirror = questionMirror(toolName, input);
+  if (!mirror) return undefined;
+  const answer = "Answer in the terminal — prompts owned by other extensions cannot be answered from Discord yet.";
+  const description = [mirror.description, answer].filter(Boolean).join("\n\n");
+  return {
+    embeds: [buildEmbed(footer, `🗣 Waiting on your answer · ${toolName}`, description, COLORS.warning, mirror.fields)],
+  };
 }

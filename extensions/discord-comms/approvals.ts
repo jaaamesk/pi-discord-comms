@@ -1,7 +1,7 @@
 import { isAbsolute, relative, resolve } from "node:path";
 import type { Config } from "./config.ts";
 import type { DiscordRest } from "./rest.ts";
-import { ButtonStyle, COLORS, clip, fence, type ActionRow, type Interaction } from "./types.ts";
+import { ButtonStyle, COLORS, clip, disabledRows, fence, type ActionRow, type Interaction } from "./types.ts";
 
 export type Decision = "allow" | "always" | "deny" | "timeout";
 export type Outcome = { decision: Decision; source: "discord" | "terminal" | "timeout" };
@@ -199,6 +199,3 @@ const decisionColor = (title: string): number =>
   title.startsWith("⛔") || title.startsWith("⏱") ? COLORS.danger : title.startsWith("✅") ? COLORS.success : COLORS.warning;
 
 const human = (ms: number): string => (ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))}s` : `${Math.max(1, Math.round(ms / 60_000))}m`);
-
-const disabledRows = (rows: ActionRow[]): ActionRow[] =>
-  rows.map((row) => ({ ...row, components: row.components.map((b) => ({ ...b, disabled: true })) }));
