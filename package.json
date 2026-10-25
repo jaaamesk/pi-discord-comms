@@ -1,6 +1,6 @@
 {
   "name": "pi-discord-comms",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Discord as a second channel for a running Pi session: pings, button approvals, and remote replies",
   "keywords": ["pi-package", "pi", "pi-coding-agent", "discord"],
   "license": "MIT",
@@ -17,8 +17,9 @@
   },
   "scripts": {
     "check": "tsc -p .",
-    "test": "node --experimental-strip-types test/approvals.ts && node --experimental-strip-types test/ask-mirror.ts && node --experimental-strip-types test/extension-load.ts",
+    "test": "node --experimental-strip-types test/approvals.ts && node --experimental-strip-types test/interactions.ts && node --experimental-strip-types test/ask-mirror.ts && node --experimental-strip-types test/extension-load.ts",
     "test:gateway": "node --experimental-strip-types test/gateway.ts",
+    "probe": "node --experimental-strip-types test/interaction-probe.ts",
     "doctor": "node --experimental-strip-types test/doctor.ts"
   },
   "pi": {

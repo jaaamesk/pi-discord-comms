@@ -14,6 +14,31 @@ export type Embed = {
 
 export const ButtonStyle = { Primary: 1, Secondary: 2, Success: 3, Danger: 4, Link: 5 } as const;
 
+// Numbers are the wire values, fixed by Discord; see
+// https://docs.discord.com/developers/interactions/receiving-and-responding
+// A button click is a MESSAGE_COMPONENT (3). APPLICATION_COMMAND (2) is a slash command,
+// which this extension does not use, so mixing the two up silently drops every click.
+export const InteractionType = {
+  Ping: 1,
+  ApplicationCommand: 2,
+  MessageComponent: 3,
+  Autocomplete: 4,
+  ModalSubmit: 5,
+} as const;
+
+export const CallbackType = {
+  /** Acknowledge without responding; nothing is shown. */
+  Pong: 1,
+  ChannelMessageWithSource: 4,
+  DeferredChannelMessageWithSource: 5,
+  /** For components: acknowledge now, edit the original message later. No loading state. */
+  DeferredUpdateMessage: 6,
+  UpdateMessage: 7,
+} as const;
+
+/** Message flag 1 << 6: visible only to the clicking user. Invalid in DMs. */
+export const EPHEMERAL = 64;
+
 export type Button = {
   type: 2;
   style: (typeof ButtonStyle)[keyof typeof ButtonStyle];
@@ -46,9 +71,12 @@ export type Interaction = {
   token: string;
   application_id: string;
   type: number;
-  data?: { custom_id?: string };
-  channel?: { id: string };
+  data?: { custom_id?: string; component_type?: number };
+  guild_id?: string;
+  channel?: { id?: string; type?: number };
+  channel_id?: string;
   message?: { id: string };
+  /** Present when the click happened in a guild; `user` when it happened in a DM. */
   member?: { user?: { id: string } };
   user?: { id: string };
 };

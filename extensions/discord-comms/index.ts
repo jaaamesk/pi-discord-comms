@@ -2,10 +2,11 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { claimLock, releaseLock } from "./lock.ts";
 import { connectGateway, Intents, type Gateway, type GatewayState } from "./gateway.ts";
 import { DiscordRest } from "./rest.ts";
-import { CONFIG_PATH, loadConfig, missingConfig } from "./config.ts";
+import { loadConfig, missingConfig } from "./config.ts";
 import { ApprovalBroker, riskReason } from "./approvals.ts";
+import { createInteractionRouter, type RouteCode, type Router } from "./interactions.ts";
 import { questionMirror } from "./ask-mirror.ts";
-import { COLORS, clip, fence, type DiscordMessage, type Embed, type Interaction, type MessagePayload } from "./types.ts";
+import { COLORS, clip, type DiscordMessage, type Embed, type Interaction, type MessagePayload } from "./types.ts";
 
 // Pi session -> Discord channel, two ways round:
 //   outbound  run settled / blocked prompt / approval request
@@ -23,6 +24,7 @@ export default function discordComms(pi: ExtensionAPI) {
   let gw: Gateway | undefined;
   let rest: DiscordRest | undefined;
   let broker: ApprovalBroker | undefined;
+  let route: Router | undefined;
   let channelId: string | undefined;
   let dormant: string | undefined;
   let lastState: GatewayState = "idle";
@@ -30,6 +32,24 @@ export default function discordComms(pi: ExtensionAPI) {
   // Set while an ask-style prompt owned by another extension is mirrored here, so the
   // generic (and contentless) "waiting at a custom" ping does not arrive as well.
   let mirroredCallId: string | undefined;
+
+  // Everything below is diagnostics. A bridge that fails silently is worse than one that
+  // complains, and both of the ways this extension can be dead (socket down, clicks refused)
+  // are otherwise invisible from the terminal.
+  const stats: Record<RouteCode, number> = { decision: 0, detail: 0, stale: 0, "wrong-user": 0, "not-a-click": 0 };
+  let seenInteractions = 0;
+  let lastEvent = "nothing yet";
+  let lastProblem = "";
+
+  const log = (message: string, warning = false) => {
+    lastEvent = message;
+    if (warning) lastProblem = message;
+    ctx0?.ui.notify(`discord: ${message}`, warning ? "warning" : "info");
+  };
+
+  const link = () => (dormant ? `dormant (${dormant})` : `${lastState}${lastDetail ? ` (${lastDetail})` : ""}`);
+  /** Whether a Discord click could actually reach this process right now. */
+  const remoteLive = () => !dormant && !!channelId && lastState === "ready";
 
   const renderStatus = () => {
     if (!ctx0?.hasUI) return;
@@ -48,7 +68,7 @@ export default function discordComms(pi: ExtensionAPI) {
       return true;
     } catch (err) {
       // A failed notification must never take a run down with it.
-      ctx0?.ui.notify(`discord: send failed — ${(err as Error).message}`, "warning");
+      log(`send failed — ${(err as Error).message}`, true);
       return false;
     }
   };
@@ -98,10 +118,13 @@ export default function discordComms(pi: ExtensionAPI) {
       embedFor(
         `${ICON.info} pi-discord-comms`,
         [
-          `state: ${lastState}${lastDetail ? ` (${lastDetail})` : ""}`,
+          `state: ${link()}`,
           `channel: ${channelId ?? "unresolved"} · tag ${tag}`,
           `level: ${cfg.level} · approvals: ${cfg.approvals}${broker?.allowingEverything ? " (allowed everything this session)" : ""}`,
           `approvals pending: ${broker?.pendingCount ?? 0} · raceTerminal: ${cfg.raceTerminal}`,
+          `clicks: ${seenInteractions} seen · ${stats.decision} decisions · ${stats.detail} detail · ${stats.stale} stale · ${stats["wrong-user"]} refused`,
+          `last event: ${lastEvent}`,
+          `last problem: ${lastProblem || "none"}`,
           `agent busy: ${ctx0 ? !ctx0.isIdle() : "unknown"}`,
         ].join("\n"),
         COLORS.info,
@@ -150,26 +173,17 @@ export default function discordComms(pi: ExtensionAPI) {
   };
 
   const onInteraction = async (interaction: Interaction) => {
-    if (interaction.type !== 2 || !rest || !broker) return; // 2 = message component
-    const who = interaction.member?.user?.id ?? interaction.user?.id;
-    try {
-      // Component interactions expire in 3 s; a type 6 ack clears that while the tool
-      // call keeps waiting for the decision.
-      await rest.interactionAck(interaction);
-    } catch {}
-    if (who !== cfg.userId) {
-      await rest
-        .interactionFollowup(interaction, { content: "pi-discord-comms only listens to its configured user.", flags: 64 })
-        .catch(() => {});
-      return;
-    }
-    const outcome = broker.handle(interaction);
-    if (outcome.kind === "detail") {
-      const body = broker.detailFor(interaction) ?? "Already answered.";
-      await rest.interactionFollowup(interaction, { content: clip(body, 2000) }).catch(() => {});
-    } else if (outcome.kind === "unknown") {
-      await rest.interactionFollowup(interaction, { content: "That request is already answered.", flags: 64 }).catch(() => {});
-    }
+    if (!route) return;
+    seenInteractions++;
+    const result = await route(interaction);
+    stats[result.code]++;
+    lastEvent =
+      result.code === "decision"
+        ? `click answered a ${result.decision} for a blocked tool call`
+        : result.code === "detail"
+          ? "clicked for full tool input"
+          : `${result.code}${result.note ? `: ${result.note}` : ""}`;
+    renderStatus();
   };
 
   const connect = () => {
@@ -185,13 +199,18 @@ export default function discordComms(pi: ExtensionAPI) {
     }
     dormant = undefined;
     rest = new DiscordRest(cfg.token!);
-    broker = new ApprovalBroker(rest, cfg, tag, () => channelId);
+    broker = new ApprovalBroker(rest, cfg, tag, () => channelId, log);
+    route = createInteractionRouter({ rest, broker, userId: cfg.userId!, log });
     gw = connectGateway({
       token: cfg.token!,
       intents: Intents.Guilds | Intents.GuildMessages | Intents.MessageContent,
       onEvent: (type, data) => {
-        if (type === "MESSAGE_CREATE") void onDiscordMessage(data as DiscordMessage).catch(() => {});
-        else if (type === "INTERACTION_CREATE") void onInteraction(data as Interaction).catch(() => {});
+        // A gateway event that throws must not take the socket down with it, but it must not
+        // disappear either: this is the only place a dropped click or inbound message can be seen.
+        if (type === "MESSAGE_CREATE")
+          void onDiscordMessage(data as DiscordMessage).catch((err: Error) => log(`could not handle a message — ${err.message}`, true));
+        else if (type === "INTERACTION_CREATE")
+          void onInteraction(data as Interaction).catch((err: Error) => log(`could not route a click — ${err.message}`, true));
       },
       onState: (state, detail) => {
         lastState = state;
@@ -207,6 +226,7 @@ export default function discordComms(pi: ExtensionAPI) {
     gw = undefined;
     rest = undefined;
     broker = undefined;
+    route = undefined;
     channelId = undefined;
     releaseLock();
   };
@@ -236,6 +256,10 @@ export default function discordComms(pi: ExtensionAPI) {
             ? `discord: dormant — ${dormant}`
             : `discord: ${lastState}${lastDetail ? ` (${lastDetail})` : ""} · #${channelId ?? "unresolved"} · tag ${tag} · level ${cfg.level} · approvals ${cfg.approvals}`,
           "info",
+        );
+        ctx.ui.notify(
+          `discord: ${seenInteractions} clicks · ${stats.decision} answered · ${stats.stale} stale · ${stats["wrong-user"]} refused · last problem: ${lastProblem || "none"}`,
+          lastProblem ? "warning" : "info",
         );
       }
       renderStatus();
@@ -268,7 +292,8 @@ export default function discordComms(pi: ExtensionAPI) {
 
   pi.on("ui_prompt_start", (event, ctx) => {
     ctx0 = ctx;
-    if (cfg.level === "quiet" || !channelId || mirroredCallId) return;
+    // A pending approval owns the prompt this fires for; it is already on Discord as a decision.
+    if (cfg.level === "quiet" || !channelId || mirroredCallId || (broker?.pendingCount ?? 0) > 0) return;
     ping(`${ICON.waiting} Pi is waiting at a ${event.kind}`, event.title ?? "(no title)", COLORS.warning);
   });
 
@@ -309,12 +334,21 @@ export default function discordComms(pi: ExtensionAPI) {
     const annotations = pi.getAllTools().find((tool) => tool.name === event.toolName)?.annotations;
     const reason = riskReason(cfg.approvals, { toolName: event.toolName, input, cwd: ctx.cwd, annotations });
     if (!reason) return undefined;
-    if (!channelId && !ctx.hasUI) {
-      return { block: true, reason: `${event.toolName} is gated (${reason}) but no approval surface is available` };
+    // Two surfaces can answer: the terminal dialog and the Discord buttons. If neither is
+    // reachable there is nobody to ask, so block now instead of waiting out the timeout.
+    if (!remoteLive()) {
+      const why = dormant ?? `discord ${lastState}`;
+      if (!ctx.hasUI) {
+        return { block: true, reason: `${event.toolName} is gated (${reason}) but no approval surface is available (${why})` };
+      }
+      // Warn only when a bridge that exists is broken. A dormant one is deliberate and already
+      // in the footer, and this handler runs for every gated call.
+      if (!dormant) log(`${event.toolName} approval is terminal-only (${why})`, true);
     }
     const { decision, source } = await broker.request(ctx, event.toolName, input, reason);
     if (decision === "allow" || decision === "always") {
       if (decision === "always") ctx.ui.notify("discord: approvals off for the rest of this session", "warning");
+      log(`${event.toolName} allowed via ${source} (${reason})`);
       return undefined;
     }
     return {

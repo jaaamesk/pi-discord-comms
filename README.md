@@ -71,6 +71,8 @@ Environment overrides: `PI_DISCORD_TOKEN`, `PI_DISCORD_USER_ID`, `PI_DISCORD_CHA
 
 The footer shows `● discord · #<channel> · <4-char session tag> · connected`, or `○ discord · <why it is dormant>`.
 
+`/discord status` also prints what a diagnosis needs: how many button clicks arrived, how many resolved a blocked call, how many were stale or refused, and the last problem it hit. Anything Discord refuses (a rejected ack, a failed embed, a reply it could not send) is reported in the terminal the moment it happens instead of being swallowed.
+
 **In Discord:** type anything to talk to the agent, `!stop` to abort the current run, `!status` for a state dump. Buttons carry a `pi:<action>:<tag>:<id>` id, so a click resolves exactly the blocked call it came from and can never answer another Pi session's request.
 
 ## Approval policy
@@ -81,13 +83,15 @@ The footer shows `● discord · #<channel> · <4-char session tag> · connected
 - **`write` / `edit`**: any path outside the project directory, and sensitive files (`.env*`, `*.pem`, `*.key`, `id_rsa`/`id_ed25519`, `.ssh/`, `.aws/`, `credentials.*`)
 - **third-party/MCP tools** that declare `destructiveHint`. Pi's own tools declare no annotations, so they are judged by the rules above instead
 
-Anything allowed runs silently. A denial returns a reason the model can read, e.g. `bash blocked: denied by the user via discord (force/recursive delete)`. Choosing **Always** turns gating off for the rest of that session and says so in the terminal.
+Anything allowed runs silently. A denial returns a reason the model can read, e.g. `bash blocked: denied by the user via discord (force/recursive delete)`. Choosing **Always** turns gating off for the rest of that session and says so in the terminal. If neither surface can answer — no live gateway and no terminal dialog — the call blocks immediately with the reason instead of waiting out the timeout.
 
 ## How it works
 
 `session_start` claims `~/.pi/agent/discord-comms.lock` and opens one gateway connection. Discord permits a single live gateway session per token per shard, so a second Pi process — another terminal, another project, a spawned subagent — stays dormant and names the current owner instead of fighting for it. Locks left by dead processes are reclaimed; a lock held by a live process of another user still counts as live.
 
-The gateway client identifies with `GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT` (33281), heartbeats at Discord's advertised interval, treats a missing ACK as a zombie session and reconnects, resumes with `session_id` + `seq` after a drop, and stops retrying on codes it cannot fix (`4004` auth, `4013`/`4014` intents). REST calls are serialised and retry once on `429`, and refuse to sit out a rate limit longer than 15 s rather than hanging an approval forever. Interactions are acknowledged with a type 6 response within the 3 s window while the tool call keeps waiting, then the embed is edited to show the outcome with disabled buttons.
+The gateway client identifies with `GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT` (33281), heartbeats at Discord's advertised interval, treats a missing ACK as a zombie session and reconnects, resumes with `session_id` + `seq` after a drop, and stops retrying on codes it cannot fix (`4004` auth, `4013`/`4014` intents). REST calls are serialised, retry once on `429`, refuse to sit out a rate limit longer than 15 s, and each attempt is capped at 15 s so a hung request cannot stall the queue a blocked approval is waiting on.
+
+A click is an `INTERACTION_CREATE` of type `MESSAGE_COMPONENT` (**3** — type 2 is a slash command, so comparing against 2 answers nothing and Discord reports `This interaction failed` on the user's side). The router answers within the 3 s window with callback type 6 (`DEFERRED_UPDATE_MESSAGE`, which shows no loading state) and then edits the embed to the outcome with disabled buttons; `Detail` and refusals come back as followups, ephemeral in a guild channel and plain in a DM, where flag 64 is rejected.
 
 Every embed footer carries a random four-character session tag, so parallel Pi work stays attributable in a single channel.
 
@@ -106,12 +110,26 @@ Read this before pointing it at a shared server.
 
 ```bash
 npm run check          # typecheck
-npm run test           # approval policy + race semantics + question mirror + dormancy rules (no network)
+npm run test           # approval policy + interaction routing + race semantics + question mirror + dormancy rules (no network)
 npm run test:gateway   # real gateway handshake, proves 4004 is treated as fatal (hits Discord)
 npm run doctor         # pre-flight against your own channel (hits Discord)
+npm run probe          # posts real buttons, then a real click must resolve them (hits Discord, needs a click)
 ```
 
 `devDependencies` exist only so `npm run check` can type against Pi's public types; the extension itself imports nothing from Pi at runtime beyond erased `import type` declarations, so no second copy of Pi's module graph is ever loaded inside the running agent.
+
+## When it is not working
+
+`npm run doctor` first: it proves the token, the channel, the guild membership, your user ID, and that an embed lands, all over REST. That leaves two things it cannot prove, and they are the two that break.
+
+| Symptom | What it means |
+|---|---|
+| Embeds arrive, buttons do nothing, Discord toasts `This interaction failed` | No `INTERACTION_CREATE` reached the process, or the ack was rejected. Run `/discord status`: `0 clicks` means the socket, the app's presence in the guild, or another gateway owner; a non-zero count with `0 answered` means the click was refused, and the refusal text tells you whether it was the user ID or a stale request. |
+| Embeds arrive but nothing you type in the channel ever reaches the agent | The gateway is not `ready` (inbound messages and clicks both arrive over it). Footer and `/discord status` name the state and the reason. |
+| `/discord status` says `dormant` | Another live Pi process holds the single gateway connection. `/discord disconnect` there, `/discord connect` here. |
+| Approvals never appear | `/discord risk <command>` shows whether the policy gates that call at all, and `!status` in the channel shows the live `approvals` mode. |
+
+`npm run probe` is the way to settle a click question for certain: it connects to the gateway on its own, posts a real approval embed with real buttons, prints the `INTERACTION_CREATE` frame it receives (type, `custom_id`, clicker, channel — never the continuation token), and exits 0 only when a click actually resolves the blocked call. It refuses to run while a live Pi session holds the lock, because a second gateway connection evicts that one; stop it first or pass `--force`.
 
 ## Known limits
 

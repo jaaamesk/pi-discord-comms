@@ -1,7 +1,11 @@
-import type { Interaction, MessagePayload } from "./types.ts";
+import { CallbackType, type Interaction, type MessagePayload } from "./types.ts";
 
 const API = "https://discord.com/api/v10";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Calls run one at a time, so a request that never returns would hold up the whole queue and
+// hang a blocking approval behind it. Every attempt gets a hard ceiling instead.
+const REQUEST_TIMEOUT_MS = 15_000;
 
 /**
  * Minimal Discord REST client: serialized calls plus 429 handling. Discord allows
@@ -31,6 +35,7 @@ export class DiscordRest {
           method,
           headers: { authorization: `Bot ${this.token}`, "content-type": "application/json" },
           body: body === undefined ? undefined : JSON.stringify(body),
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
         if (res.status === 429) {
           const j: { retry_after?: number } = await res.json().catch(() => ({}));
@@ -56,10 +61,10 @@ export class DiscordRest {
     this.call<{ id: string }>("POST", "/users/@me/channels", { recipient_id: userId });
   appId = () => this.call<{ id: string }>("GET", "/oauth2/applications/@current");
 
-  // Interactions must be answered within 3 s. A type 6 response acknowledges the click
-  // without content; the visible message is then edited for up to 15 minutes.
-  interactionAck = (interaction: Interaction) =>
-    this.call<void>("POST", `/interactions/${interaction.id}/${interaction.token}/callback`, { type: 6 });
+  // Interactions must be answered within 3 s. A deferred-update callback clears that while the
+  // tool call keeps waiting, and shows no loading state; the embed is edited for the outcome.
+  interactionAck = (interaction: Interaction, type: number = CallbackType.DeferredUpdateMessage) =>
+    this.call<void>("POST", `/interactions/${interaction.id}/${interaction.token}/callback`, { type });
   interactionEdit = (interaction: Interaction, payload: Partial<MessagePayload>) =>
     this.call<{ id: string }>("PATCH", `/webhooks/${interaction.application_id}/${interaction.token}/messages/@original`, payload);
   interactionFollowup = (interaction: Interaction, payload: MessagePayload) =>

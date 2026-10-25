@@ -27,13 +27,19 @@ const read = (): LockOwner | undefined => {
   }
 };
 
+/** The live Pi process holding the gateway, if another one is connected right now. */
+export function liveOwner(): LockOwner | undefined {
+  const owner = read();
+  return owner && owner.pid !== process.pid && alive(owner.pid) ? owner : undefined;
+}
+
 /**
  * Claim the gateway, or report who else holds it. A lock whose pid is no longer
  * running is stale and gets taken over.
  */
 export function claimLock(tag: string): { ok: true } | { ok: false; owner: LockOwner } {
-  const owner = read();
-  if (owner && owner.pid !== process.pid && alive(owner.pid)) return { ok: false, owner };
+  const owner = liveOwner();
+  if (owner) return { ok: false, owner };
   const me: LockOwner = { pid: process.pid, cwd: process.cwd(), tag, startedAt: Date.now() };
   try {
     writeFileSync(LOCK_PATH, JSON.stringify(me), { mode: 0o600 });

@@ -84,12 +84,20 @@ export class ApprovalBroker {
   private readonly cfg: Config;
   private readonly tag: string;
   private readonly channel: () => string | undefined;
+  private readonly log: (message: string, warning?: boolean) => void;
 
-  constructor(rest: DiscordRest, cfg: Config, tag: string, channel: () => string | undefined) {
+  constructor(
+    rest: DiscordRest,
+    cfg: Config,
+    tag: string,
+    channel: () => string | undefined,
+    log: (message: string, warning?: boolean) => void = () => {},
+  ) {
     this.rest = rest;
     this.cfg = cfg;
     this.tag = tag;
     this.channel = channel;
+    this.log = log;
   }
 
   get allowingEverything(): boolean {
@@ -119,7 +127,10 @@ export class ApprovalBroker {
       title: `⚠️ ${toolName} — ${reason}`,
       description: `${excerpt}\n\n${title}`,
       color: decisionColor(title),
-      fields: [{ name: "why", value: clip(reason, 1024) }],
+      fields: [
+        { name: "why", value: clip(reason, 1024) },
+        { name: "if nobody answers", value: `blocked after ${human(this.cfg.approvalTimeoutMs)}` },
+      ],
       timestamp: new Date().toISOString(),
     });
 
@@ -128,7 +139,10 @@ export class ApprovalBroker {
     if (channel) {
       try {
         messageId = (await this.rest.send(channel, { embeds: [embedFor("Awaiting your decision.")], components: rows })).id;
-      } catch {}
+      } catch (err) {
+        // Say so: an approval that only exists in the terminal is a different decision to make.
+        this.log(`${toolName} approval embed failed to send — ${(err as Error).message}`, true);
+      }
     }
 
     return new Promise<Outcome>((done) => {
@@ -141,7 +155,11 @@ export class ApprovalBroker {
         clearTimeout(timer);
         ctl.abort();
         if (decision === "always") this.always = true;
-        if (channel && messageId) void this.rest.edit(channel, messageId, { embeds: [embedFor(DECISION_LABEL[decision])], components: disabledRows(rows) }).catch(() => {});
+        if (channel && messageId) {
+          void this.rest
+            .edit(channel, messageId, { embeds: [embedFor(DECISION_LABEL[decision])], components: disabledRows(rows) })
+            .catch((err: Error) => this.log(`could not update the approval embed — ${err.message}`, true));
+        }
         done({ decision, source });
       };
       const timer = setTimeout(() => finish("timeout", "timeout"), this.cfg.approvalTimeoutMs);
@@ -179,6 +197,8 @@ export class ApprovalBroker {
 
 const decisionColor = (title: string): number =>
   title.startsWith("⛔") || title.startsWith("⏱") ? COLORS.danger : title.startsWith("✅") ? COLORS.success : COLORS.warning;
+
+const human = (ms: number): string => (ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))}s` : `${Math.max(1, Math.round(ms / 60_000))}m`);
 
 const disabledRows = (rows: ActionRow[]): ActionRow[] =>
   rows.map((row) => ({ ...row, components: row.components.map((b) => ({ ...b, disabled: true })) }));
